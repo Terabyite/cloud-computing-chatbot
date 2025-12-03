@@ -2,7 +2,7 @@ variable "project"        { type = string }
 variable "vpc_id"         { type = string }
 variable "allow_ssh_cidr" { type = list(string) }
 
-# ALB Security Group 
+# ALB Security Group: 
 resource "aws_security_group" "alb" {
   name   = "${var.project}-alb-sg"
   vpc_id = var.vpc_id
@@ -30,7 +30,7 @@ resource "aws_security_group" "alb" {
   tags = { Name = "${var.project}-alb-sg" }
 }
 
-# EC2 Security Group
+# EC2 Security Group: 
 resource "aws_security_group" "ec2" {
   name   = "${var.project}-ec2-sg"
   vpc_id = var.vpc_id
