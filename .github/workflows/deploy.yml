@@ -1,57 +1,183 @@
-# Use lightweight Python image — change to TF base if you want preinstalled TF
-FROM python:3.10-slim
+name: Terraform + Docker Deploy (wait-for-ssm)
 
-# metadata
-LABEL maintainer="you@example.com"
-ENV PYTHONUNBUFFERED=1 \
-    POETRY_VIRTUALENVS_CREATE=false \
-    NLTK_DATA=/usr/share/nltk_data
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
 
-WORKDIR /app
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  SSM_TAG_KEY: ManagedBy
+  SSM_TAG_VALUE: github-actions
+  # How long to wait (seconds) for instances to appear and register with SSM
+  WAIT_FOR_INSTANCES_TIMEOUT: 900   # 15 minutes
+  WAIT_FOR_SSM_TIMEOUT: 900         # 15 minutes
+  SSM_COMMAND_TIMEOUT: 3600         # seconds for SSM send-command itself (1 hour)
+  SSM_COMMAND_POLL_INTERVAL: 5
 
-# Install system dependencies required for many scientific packages and for docker build reliability.
-# Keep packages minimal; add any extras your requirements need.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      build-essential \
-      git \
-      curl \
-      ca-certificates \
-      wget \
-      gnupg \
-      libatlas-base-dev \
-      && rm -rf /var/lib/apt/lists/*
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-# Create non-root user
-ARG UNAME=app
-ARG UID=1000
-RUN useradd --create-home --shell /bin/bash --uid ${UID} ${UNAME} && \
-    chown -R ${UNAME}:${UNAME} /app
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-# Copy only requirements first to leverage layer cache
-COPY requirements.txt /app/requirements.txt
+      - name: Setup Terraform CLI
+        uses: hashicorp/setup-terraform@v3
 
-# Upgrade pip & install requirements
-RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r /app/requirements.txt
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -input=false
 
-# Create global nltk data dir and download required corpora
-RUN mkdir -p /usr/share/nltk_data && \
-    python3 -m nltk.downloader -d /usr/share/nltk_data punkt wordnet
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -auto-approve -input=false
 
-# Copy app source
-COPY . /app
-RUN chown -R ${UNAME}:${UNAME} /app
+      - name: Wait for EC2 instances with tag (ManagedBy=github-actions)
+        id: wait_instances
+        run: |
+          set -eux
+          KEY="${{ env.SSM_TAG_KEY }}"
+          VAL="${{ env.SSM_TAG_VALUE }}"
+          DEADLINE=$((SECONDS + ${{ env.WAIT_FOR_INSTANCES_TIMEOUT }}))
+          echo "Waiting for EC2 instances with tag ${KEY}=${VAL}..."
+          while [ $SECONDS -lt $DEADLINE ]; do
+            # find instances in running state with the tag
+            INSTANCES_JSON=$(aws ec2 describe-instances \
+              --filters "Name=tag:${KEY},Values=${VAL}" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+              --query 'Reservations[].Instances[].InstanceId' --output json)
+            INST_COUNT=$(echo "$INSTANCES_JSON" | jq 'length')
+            echo "Found $INST_COUNT instance(s): $INSTANCES_JSON"
+            if [ "$INST_COUNT" -ge 1 ]; then
+              echo "$INSTANCES_JSON" > /tmp/instances.json
+              echo "instances=$(jq -r '.[]' /tmp/instances.json | paste -sd, -)" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timeout waiting for EC2 instances with tag ${KEY}=${VAL}"
+          exit 2
 
-# Expose port
-EXPOSE 8080
+      - name: Wait for instances to register as SSM managed instances
+        id: wait_ssm
+        run: |
+          set -eux
+          INST_LIST="${{ steps.wait_instances.outputs.instances }}"
+          if [ -z "$INST_LIST" ]; then
+            echo "No instances list - nothing to do"; exit 1
+          fi
+          # convert comma list to space-separated
+          INST_IDS=$(echo "$INST_LIST" | tr ',' ' ')
+          echo "Waiting for SSM registration for instances: $INST_IDS"
+          DEADLINE=$((SECONDS + ${{ env.WAIT_FOR_SSM_TIMEOUT }}))
+          while [ $SECONDS -lt $DEADLINE ]; do
+            REGISTERED=""
+            for i in $INST_IDS; do
+              # This returns something only if the instance is known to SSM
+              INFO=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${i}" --output json)
+              COUNT=$(echo "$INFO" | jq -r '.InstanceInformationList | length')
+              echo "Instance ${i} SSM info count: ${COUNT}"
+              if [ "$COUNT" -ge 1 ]; then
+                REGISTERED="$REGISTERED $i"
+              fi
+            done
+            if [ -n "$REGISTERED" ]; then
+              echo "Registered instances:$REGISTERED"
+              echo "ssm_instances=$(echo $REGISTERED | xargs)" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timeout waiting for SSM registration"
+          aws ssm describe-instance-information --output json || true
+          exit 2
 
-# Healthcheck (assumes your tornado root / returns 200)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://127.0.0.1:8080/ || exit 1
+      - name: Build SSM commands JSON
+        id: build_cmd
+        run: |
+          cat > /tmp/params.json <<'JSON'
+{ "commands": [
+  "set -xe",
+  "echo 'running deploy on $(hostname)'",
+  "if command -v docker >/dev/null 2>&1; then echo 'docker present'; else (if command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y git ca-certificates curl gnupg lsb-release build-essential && mkdir -p /usr/share/keyrings && curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list && apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io || apt-get install -y docker.io ; else yum install -y docker git || true; fi); fi",
+  "sudo systemctl enable --now docker || true",
+  "cd /home/ubuntu || cd /home/ec2-user || cd /home/app || true",
+  "if [ ! -d chatbot ]; then git clone https://github.com/Terabyite/cloud-computing-chatbot.git chatbot || true; fi",
+  "cd chatbot || true",
+  "git pull || true",
+  "sudo docker rm -f chatbot || true",
+  "sudo docker build -t chatbot:latest .",
+  "sudo docker run -d --name chatbot -p 8080:8080 --restart=always chatbot:latest",
+  "echo 'done on $(hostname)'"
+] }
+JSON
+          echo "/tmp/params.json:"
+          sed -n '1,200p' /tmp/params.json
 
-# Run as non-root user
-USER ${UNAME}
+      - name: Send SSM command to instances (by tag)
+        id: send_cmd
+        run: |
+          set -eux
+          KEY="${{ env.SSM_TAG_KEY }}"
+          VAL="${{ env.SSM_TAG_VALUE }}"
+          CMD_OUT=$(aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --targets "Key=tag:${KEY},Values=${VAL}" \
+            --parameters file:///tmp/params.json \
+            --timeout-seconds ${{ env.SSM_COMMAND_TIMEOUT }} \
+            --comment "Deploy chatbot via github-actions" \
+            --output json)
+          echo "$CMD_OUT" > /tmp/sendcmd.json
+          echo "Sent: /tmp/sendcmd.json"
+          COMMAND_ID=$(jq -r '.Command.CommandId' /tmp/sendcmd.json)
+          echo "command_id=$COMMAND_ID" >> $GITHUB_OUTPUT
+          echo "$COMMAND_ID" > /tmp/command_id.txt
 
-# Default command
-CMD ["python3", "chatdemo.py"]
+      - name: Poll SSM command until finished and print per-instance outputs
+        env:
+          CMD_ID: ${{ steps.send_cmd.outputs.command_id }}
+          POLL_INTERVAL: ${{ env.SSM_COMMAND_POLL_INTERVAL }}
+          SSM_TIMEOUT: ${{ env.SSM_COMMAND_TIMEOUT }}
+        run: |
+          set -eux
+          CMD_ID=$(cat /tmp/command_id.txt)
+          DEADLINE=$((SECONDS + SSM_TIMEOUT))
+          echo "Polling command id ${CMD_ID} until finished..."
+          while [ $SECONDS -lt $DEADLINE ]; do
+            aws ssm list-command-invocations --command-id "$CMD_ID" --details --output json > /tmp/invocations.json || true
+            STATUSES=$(jq -r '.CommandInvocations[].Status' /tmp/invocations.json || echo "")
+            echo "Statuses: $STATUSES"
+            if [ -z "$STATUSES" ]; then sleep $POLL_INTERVAL; continue; fi
+            if echo "$STATUSES" | grep -E "(Pending|InProgress|Delayed)" >/dev/null; then sleep $POLL_INTERVAL; continue; fi
+            break
+          done
+          if [ $SECONDS -ge $DEADLINE ]; then
+            echo "Timeout waiting for command ${CMD_ID}"
+            aws ssm list-command-invocations --command-id "$CMD_ID" --details --output json || true
+            exit 2
+          fi
+          # print outputs per instance
+          FAILED=0
+          for INSTANCE in $(jq -r '.CommandInvocations[].InstanceId' /tmp/invocations.json); do
+            echo "---- Output for $INSTANCE ----"
+            aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE" --output json > /tmp/inv_${INSTANCE}.json || true
+            echo "--- STDOUT ---"
+            jq -r '.StandardOutputContent' /tmp/inv_${INSTANCE}.json || true
+            echo "--- STDERR ---"
+            jq -r '.StandardErrorContent' /tmp/inv_${INSTANCE}.json || true
+            STATUS=$(jq -r '.Status' /tmp/inv_${INSTANCE}.json || echo "Unknown")
+            echo "Status: $STATUS"
+            if [ "$STATUS" != "Success" ]; then FAILED=1; fi
+          done
+          if [ "$FAILED" -ne 0 ]; then
+            echo "One or more SSM invocations failed - check logs above"
+            exit 1
+          fi
+          echo "All invocations succeeded."
