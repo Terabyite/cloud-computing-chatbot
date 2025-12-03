@@ -10,16 +10,60 @@ variable "min_size"           { type = number }
 variable "max_size"           { type = number }
 variable "chatbot_repo_url"   { type = string }
 variable "ami_id"             { type = string }
+variable "tags" {
+  type    = map(string)
+  default = {}
+}
 variable "iam_instance_profile_name" {
   description = "Name of the IAM instance profile to attach to EC2 instances"
   type        = string
 }
 
+# Instance role for SSM Session Manager (so you can shell in without public SSH)
+resource "aws_iam_role" "ec2_role" {
+  name = "${var.project}-ec2-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect = "Allow",
+      Principal = { Service = "ec2.amazonaws.com" },
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_core" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "${var.project}-ec2-profile"
+  role = aws_iam_role.ec2_role.name
+}
+
+
 
 # Launch Template
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    # Jammy (22.04) server images; change if you prefer focal (20.04) or hirsute etc.
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 resource "aws_launch_template" "lt" {
   name_prefix            = "${var.project}-lt-"
-  image_id               = var.ami_id
+  image_id               = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   key_name               = var.key_name
   vpc_security_group_ids = [var.ec2_sg_id]
@@ -28,14 +72,26 @@ resource "aws_launch_template" "lt" {
     name = var.iam_instance_profile_name
   }
 
+  # Do NOT set user_data (you said you're not using it). Leave blank.
+  # If you ever want user-data later, add var.user_data + base64encode(var.user_data)
+
   tag_specifications {
     resource_type = "instance"
-    tags = {
-      Name = "${var.project}-ec2"
+    tags = merge({
+      Name      = "${var.project}-ec2"
       ManagedBy = "github-actions"
-    }
+      Project   = var.project
+    }, var.tags)
+  }
+
+  # Recommended IMDS v2 enforcement (secure)
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+    http_endpoint               = "enabled"
   }
 }
+
 
 
 resource "aws_autoscaling_group" "asg" {

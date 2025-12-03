@@ -43,7 +43,7 @@ module "asg" {
   min_size            = var.min_size
   max_size            = var.max_size
   chatbot_repo_url    = var.chatbot_repo_url
-  ami_id = data.aws_ami.latest_amazon_linux.id
+  ami_id              = data.aws_ami.ubuntu.id
   iam_instance_profile_name = module.iam.ec2_instance_profile_name
 }
 
@@ -98,12 +98,12 @@ module "iam" {
 }
 # Amazon Linux 2023 AMI lookup (official, x86_64)
 
-data "aws_ami" "latest_amazon_linux" {
+data "aws_ami" "ubuntu" {
+  owners      = ["099720109477"] # Canonical
   most_recent = true
-  owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]
   }
 }
