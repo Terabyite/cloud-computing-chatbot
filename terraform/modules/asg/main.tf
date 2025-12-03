@@ -10,7 +10,16 @@ variable "min_size"           { type = number }
 variable "max_size"           { type = number }
 variable "chatbot_repo_url"   { type = string }
 variable "ami_id"             { type = string }
+variable "iam_instance_profile_name" {
+  description = "Name of the IAM instance profile to attach to EC2 instances"
+  type        = string
+}
 variable "tags" {
+  type    = map(string)
+  default = {}
+}
+
+/*variable "tags" {
   type    = map(string)
   default = {}
 }
@@ -40,7 +49,7 @@ resource "aws_iam_role_policy_attachment" "ssm_core" {
 resource "aws_iam_instance_profile" "ec2_profile" {
   name = "${var.project}-ec2-profile"
   role = aws_iam_role.ec2_role.name
-}
+}*/
 
 
 
