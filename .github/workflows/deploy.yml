@@ -1,13 +1,71 @@
-name: Terraform + Docker Deploy
+name: Build Docker locally, upload to S3, Terraform apply, Deploy via SSM
 
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ai-chatbot
+  IMAGE_TAG: latest
+  TAR_PREFIX: ai-chatbot-image
+  SSM_TARGET_KEY: "tag:ManagedBy"
+  SSM_TARGET_VALUE: "github-actions"
+  TF_DIR: terraform
+
+permissions:
+  contents: read
 
 jobs:
-  deploy:
+  build-save-upload:
+    name: Build image, save tar, upload to S3
     runs-on: ubuntu-latest
+    outputs:
+      s3_key: ${{ steps.upload.outputs.s3_key }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx (optional)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+
+      - name: Save image to tar.gz
+        id: save
+        run: |
+          COMMIT=${{ github.sha }}
+          TAR_FILE="${TAR_PREFIX}-${COMMIT}.tar.gz"
+          docker save "${IMAGE_NAME}:${IMAGE_TAG}" | gzip > "${TAR_FILE}"
+          echo "tarfile=${TAR_FILE}" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload tar to S3
+        id: upload
+        env:
+          TAR_FILE: ${{ steps.save.outputs.tarfile || '' }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          if [ -z "$S3_BUCKET" ]; then
+            echo "S3_BUCKET secret not set"; exit 1
+          fi
+          TAR_FILE="${TAR_FILE}"
+          KEY="docker-images/${TAR_FILE}"
+          aws s3 cp "${TAR_FILE}" "s3://${S3_BUCKET}/${KEY}" --acl private
+          echo "::set-output name=s3_key::${KEY}"
+
+  terraform-apply:
+    name: Terraform init & apply
+    needs: build-save-upload
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -22,29 +80,90 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform Init
-        working-directory: terraform
-        run: terraform init
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
 
-      - name: Terraform Apply
-        working-directory: terraform
-        run: terraform apply -auto-approve
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_key_name: ${{ secrets.TF_VAR_key_name || "" }}
+          TF_VAR_project: ${{ secrets.TF_VAR_project || "" }}
+        run: terraform apply -auto-approve -input=false
 
-      - name: Deploy chatbot with Docker via SSM
+  deploy-ssm:
+    name: Deploy to EC2 via SSM (download tar from S3, load image, run)
+    needs: terraform-apply
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy via SSM Run Command
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_KEY: ${{ needs.build-save-upload.outputs.s3_key }}
+          TAR_URL: "" 
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          CONTAINER_NAME: ${{ env.IMAGE_NAME }}
+          SSM_TARGET_KEY: ${{ env.SSM_TARGET_KEY }}
+          SSM_TARGET_VALUE: ${{ env.SSM_TARGET_VALUE }}
         run: |
+          set -euxo pipefail
+          if [ -z "${S3_BUCKET}" ] || [ -z "${S3_KEY}" ]; then
+            echo "Missing S3_BUCKET or S3_KEY"; exit 1
+          fi
+
+          # SSM script that runs on instances
+          cat > /tmp/ssm-deploy.sh <<'SSM'
+#!/bin/bash
+set -xe
+
+S3_BUCKET="${S3_BUCKET}"
+S3_KEY="${S3_KEY}"
+TAR="/tmp/$(basename ${S3_KEY})"
+CONTAINER_NAME="${CONTAINER_NAME}"
+IMAGE_NAME="${IMAGE_NAME}:latest"
+
+# Install docker (Ubuntu) if absent
+if command -v apt-get >/dev/null 2>&1; then
+  if ! command -v docker >/dev/null 2>&1; then
+    apt-get update -y
+    apt-get install -y ca-certificates curl gnupg lsb-release
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+      > /etc/apt/sources.list.d/docker.list
+    apt-get update -y
+    apt-get install -y docker-ce docker-ce-cli containerd.io
+    systemctl enable --now docker || true
+  fi
+fi
+
+# Download tar from S3 (assumes instance role has s3:GetObject for the bucket)
+aws s3 cp "s3://${S3_BUCKET}/${S3_KEY}" "${TAR}"
+
+# Load docker image and run
+docker load -i "${TAR}"
+
+# stop & remove old container
+docker rm -f "${CONTAINER_NAME}" || true
+
+# run new container mapping port 8080
+docker run -d --name "${CONTAINER_NAME}" --restart unless-stopped -p 8080:8080 "${IMAGE_NAME}"
+SSM
+
+          # sanify the script for aws cli JSON parameter (escape newlines)
+          CMD=$(sed -e 's/"/\\"/g' /tmp/ssm-deploy.sh | awk '{printf "%s\\n", $0}')
+          
           aws ssm send-command \
             --document-name "AWS-RunShellScript" \
-            --targets "Key=tag:Name,Values=ai-chatbot-ec2" \
-            --parameters 'commands=[
-              "sudo yum update -y",
-              "sudo yum install -y docker git",
-              "sudo systemctl enable docker",
-              "sudo systemctl start docker",
-              "cd /home/ec2-user",
-              "if [ ! -d chatbot ]; then git clone https://github.com/Terabyite/cloud-computing-chatbot.git chatbot; fi",
-              "cd chatbot",
-              "git pull",
-              "sudo docker rm -f chatbot || true",
-              "sudo docker build -t chatbot:latest .",
-              "sudo docker run -d --name chatbot -p 8080:8080 --restart=always chatbot:latest"
-            ]'
+            --comment "Deploy ai-chatbot from s3://${S3_BUCKET}/${S3_KEY}" \
+            --targets "Key=${SSM_TARGET_KEY},Values=${SSM_TARGET_VALUE}" \
+            --parameters commands=["#!/bin/bash","${CMD}"] \
+            --timeout-seconds 600 \
+            --output json

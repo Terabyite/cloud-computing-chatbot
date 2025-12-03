@@ -15,6 +15,38 @@ variable "tags" {
   default     = {}
 }
 
+variable "s3_bucket_name" {
+  type = string
+  description = "S3 bucket name for storing Docker artifacts"
+}
+# example: minimal policy
+resource "aws_iam_policy" "ec2_s3_read_images" {
+  name        = "${var.project}-ec2-s3-read-images"
+  description = "Allow EC2 instances to read docker image tarballs from S3 uploaded by CI"
+  policy      = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::${var.s3_bucket_name}",
+          "arn:aws:s3:::${var.s3_bucket_name}/*"
+        ]
+      }
+    ]
+  })
+}
+
+# attach to role (example if role is aws_iam_role.ec2_role)
+resource "aws_iam_role_policy_attachment" "attach_ec2_s3_read" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = aws_iam_policy.ec2_s3_read_images.arn
+}
 # IAM role the EC2 instances will assume
 resource "aws_iam_role" "ec2_role" {
   name               = "${var.project}-ec2-role"
