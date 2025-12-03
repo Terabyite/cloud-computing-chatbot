@@ -52,7 +52,24 @@ resource "aws_iam_role" "ec2_role" {
     }]
   })
 }
+# attach AmazonSSMManagedInstanceCore so SSM agent can register
+resource "aws_iam_role_policy_attachment" "ec2_ssm_core" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
 
+# optional: give instances the ability to write logs to CloudWatch (useful later)
+resource "aws_iam_role_policy_attachment" "ec2_cw_agent" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+  # remove this block if you don't want CloudWatch permissions
+}
+
+# create instance profile for the role (attach to EC2 launch template)
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "${var.project}-ec2-instance-profile"
+  role = aws_iam_role.ec2_role.name
+}
 # Launch Template
 resource "aws_launch_template" "lt" {
   name_prefix            = "${var.project}-lt-"
