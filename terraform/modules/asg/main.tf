@@ -10,6 +10,10 @@ variable "min_size"           { type = number }
 variable "max_size"           { type = number }
 variable "chatbot_repo_url"   { type = string }
 variable "ami_id"             { type = string }
+variable "iam_instance_profile_name" {
+  description = "Name of the IAM instance profile to attach to EC2 instances"
+  type        = string
+}
 
 # Instance role for SSM Session Manager (so you can shell in without public SSH)
 resource "aws_iam_role" "ec2_role" {
@@ -36,7 +40,6 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 
 
 # Launch Template
-
 resource "aws_launch_template" "lt" {
   name_prefix            = "${var.project}-lt-"
   image_id               = var.ami_id
@@ -44,20 +47,18 @@ resource "aws_launch_template" "lt" {
   key_name               = var.key_name
   vpc_security_group_ids = [var.ec2_sg_id]
 
-  user_data = base64encode(local.userdata) 
-
   iam_instance_profile {
-    name = aws_iam_instance_profile.ec2_profile.name
+    name = var.iam_instance_profile_name
   }
 
   tag_specifications {
     resource_type = "instance"
     tags = {
       Name = "${var.project}-ec2"
+      ManagedBy = "github-actions"
     }
   }
 }
-
 
 
 resource "aws_autoscaling_group" "asg" {

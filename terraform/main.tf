@@ -44,6 +44,7 @@ module "asg" {
   max_size            = var.max_size
   chatbot_repo_url    = var.chatbot_repo_url
   ami_id = data.aws_ami.latest_amazon_linux.id
+  iam_instance_profile_name = module.iam.ec2_instance_profile_name
 }
 
 # Route53 Zone
@@ -78,6 +79,23 @@ module "dns" {
   alb_zone_id    = module.alb.alb_zone_id
 }
 
+#iam
+module "iam" {
+  source  = "./modules/iam"
+  project = var.project
+
+  extra_managed_policy_arns = [
+    "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",         # allow CloudWatch agent to send metrics
+    "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess",           # (optional) broader logs access for convenience
+    "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",             # allow reading artifacts from S3
+    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"  # optional if you later use ECR pulls
+  ]
+
+  tags = {
+    Owner = "devops"
+    Env   = "prod"
+  }
+}
 # Amazon Linux 2023 AMI lookup (official, x86_64)
 
 data "aws_ami" "latest_amazon_linux" {
