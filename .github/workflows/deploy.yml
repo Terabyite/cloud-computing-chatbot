@@ -1,65 +1,57 @@
-name: Terraform + Docker Deploy
+# Use lightweight Python image — change to TF base if you want preinstalled TF
+FROM python:3.10-slim
 
-on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch:
+# metadata
+LABEL maintainer="you@example.com"
+ENV PYTHONUNBUFFERED=1 \
+    POETRY_VIRTUALENVS_CREATE=false \
+    NLTK_DATA=/usr/share/nltk_data
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
+WORKDIR /app
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+# Install system dependencies required for many scientific packages and for docker build reliability.
+# Keep packages minimal; add any extras your requirements need.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      git \
+      curl \
+      ca-certificates \
+      wget \
+      gnupg \
+      libatlas-base-dev \
+      && rm -rf /var/lib/apt/lists/*
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+# Create non-root user
+ARG UNAME=app
+ARG UID=1000
+RUN useradd --create-home --shell /bin/bash --uid ${UID} ${UNAME} && \
+    chown -R ${UNAME}:${UNAME} /app
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+# Copy only requirements first to leverage layer cache
+COPY requirements.txt /app/requirements.txt
 
-      - name: Terraform Init
-        working-directory: terraform
-        run: terraform init -input=false
+# Upgrade pip & install requirements
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r /app/requirements.txt
 
-      - name: Terraform Apply
-        working-directory: terraform
-        run: terraform apply -auto-approve -input=false
+# Create global nltk data dir and download required corpora
+RUN mkdir -p /usr/share/nltk_data && \
+    python3 -m nltk.downloader -d /usr/share/nltk_data punkt wordnet
 
-      - name: Deploy chatbot with Docker via SSM (target: ManagedBy=github-actions)
-        env:
-          SSM_TAG_KEY: ManagedBy
-          SSM_TAG_VALUE: github-actions
-        run: |
-          aws ssm send-command \
-            --document-name "AWS-RunShellScript" \
-            --targets "Key=tag:${SSM_TAG_KEY},Values=${SSM_TAG_VALUE}" \
-            --parameters 'commands=[
-              "set -xe",
-              "sudo apt-get update -y || sudo yum update -y || true",
-              "if command -v docker >/dev/null 2>&1; then echo docker present; else ( \
-                 if command -v apt-get >/dev/null 2>&1; then \
-                   apt-get install -y ca-certificates curl gnupg lsb-release && \
-                   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg || true && \
-                   echo \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list && \
-                   apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io || apt-get install -y docker.io || true ; \
-                 else \
-                   yum install -y docker git || true ; \
-                 fi ); fi",
-              "sudo systemctl enable docker || true",
-              "sudo systemctl start docker || true",
-              "cd /home/ec2-user || cd /home/ubuntu || cd /root || true",
-              "if [ ! -d chatbot ]; then git clone https://github.com/Terabyite/cloud-computing-chatbot.git chatbot; fi",
-              "cd chatbot || true",
-              "git pull || true",
-              "sudo docker rm -f chatbot || true",
-              "sudo docker build -t chatbot:latest .",
-              "sudo docker run -d --name chatbot -p 8080:8080 --restart=always chatbot:latest"
-            ]' \
-            --timeout-seconds 600 \
-            --comment "Deploy chatbot docker via SSM (ManagedBy=github-actions)"
+# Copy app source
+COPY . /app
+RUN chown -R ${UNAME}:${UNAME} /app
+
+# Expose port
+EXPOSE 8080
+
+# Healthcheck (assumes your tornado root / returns 200)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://127.0.0.1:8080/ || exit 1
+
+# Run as non-root user
+USER ${UNAME}
+
+# Default command
+CMD ["python3", "chatdemo.py"]
