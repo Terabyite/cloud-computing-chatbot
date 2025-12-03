@@ -55,7 +55,7 @@ variable "allow_ssh_cidr" {
 variable "chatbot_repo_url" {
   description = "GitHub repository URL for chatbot code"
   type        = string
-  default     = "https://github.com/edwincai/cloud-computing-chatbot.git"
+  default     = "https://github.com/Terabyite/cloud-computing-chatbot.git"
 }
 
 # Load Balancer Logging
