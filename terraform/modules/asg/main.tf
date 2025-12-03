@@ -1,3 +1,8 @@
+
+
+# -------------------------
+# Input variables (keep these in variables.tf if separated)
+# -------------------------
 variable "project"            { type = string }
 variable "vpc_id"             { type = string }
 variable "private_subnet_ids" { type = list(string) }
@@ -19,48 +24,15 @@ variable "tags" {
   default = {}
 }
 
-/*variable "tags" {
-  type    = map(string)
-  default = {}
-}
-variable "iam_instance_profile_name" {
-  description = "Name of the IAM instance profile to attach to EC2 instances"
-  type        = string
-}
-
-# Instance role for SSM Session Manager (so you can shell in without public SSH)
-resource "aws_iam_role" "ec2_role" {
-  name = "${var.project}-ec2-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Principal = { Service = "ec2.amazonaws.com" },
-      Action = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ssm_core" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "${var.project}-ec2-profile"
-  role = aws_iam_role.ec2_role.name
-}*/
-
-
-
-# Launch Template
+# -------------------------
+# Ubuntu AMI lookup
+# -------------------------
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
-    # Jammy (22.04) server images; change if you prefer focal (20.04) or hirsute etc.
     values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
 
@@ -70,6 +42,9 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# -------------------------
+# Launch Template (Ubuntu)
+# -------------------------
 resource "aws_launch_template" "lt" {
   name_prefix            = "${var.project}-lt-"
   image_id               = data.aws_ami.ubuntu.id
@@ -81,9 +56,6 @@ resource "aws_launch_template" "lt" {
     name = var.iam_instance_profile_name
   }
 
-  # Do NOT set user_data (you said you're not using it). Leave blank.
-  # If you ever want user-data later, add var.user_data + base64encode(var.user_data)
-
   tag_specifications {
     resource_type = "instance"
     tags = merge({
@@ -93,7 +65,7 @@ resource "aws_launch_template" "lt" {
     }, var.tags)
   }
 
-  # Recommended IMDS v2 enforcement (secure)
+  # enforce IMDSv2 (recommended)
   metadata_options {
     http_tokens                 = "required"
     http_put_response_hop_limit = 2
@@ -101,8 +73,9 @@ resource "aws_launch_template" "lt" {
   }
 }
 
-
-
+# -------------------------
+# Auto Scaling Group
+# -------------------------
 resource "aws_autoscaling_group" "asg" {
   name                = "${var.project}-asg"
   desired_capacity    = var.desired_capacity
@@ -110,35 +83,54 @@ resource "aws_autoscaling_group" "asg" {
   max_size            = var.max_size
   vpc_zone_identifier = var.private_subnet_ids
   target_group_arns   = [var.target_group_arn]
-  health_check_type   = "EC2"
-  health_check_grace_period = 120
+
+  # Use ELB health so ASG follows ALB target health
+  health_check_type         = "ELB"
+  health_check_grace_period = 300
 
   launch_template {
     id      = aws_launch_template.lt.id
     version = "$Latest"
   }
 
+  # Basic name tag + propagate additional tags (propagate_at_launch true)
   tag {
     key                 = "Name"
     value               = "${var.project}-ec2"
     propagate_at_launch = true
   }
 
+  dynamic "tag" {
+    for_each = var.tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+
   lifecycle { create_before_destroy = true }
 }
 
-# Target tracking autoscaling by average CPU ~50%
+# -------------------------
+# Autoscaling target-tracking policy (CPU ~50%)
+# -------------------------
 resource "aws_autoscaling_policy" "cpu_tgt" {
   name                   = "${var.project}-cpu-50"
   autoscaling_group_name = aws_autoscaling_group.asg.name
   policy_type            = "TargetTrackingScaling"
+
   target_tracking_configuration {
-    predefined_metric_specification { predefined_metric_type = "ASGAverageCPUUtilization" }
+    predefined_metric_specification {
+      predefined_metric_type = "ASGAverageCPUUtilization"
+    }
     target_value = 50
   }
 }
 
-# EC2/ASG CPU alarm
+# -------------------------
+# CloudWatch alarm for high CPU
+# -------------------------
 resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   alarm_name          = "${var.project}-EC2-CPU-High"
   comparison_operator = "GreaterThanThreshold"
@@ -148,8 +140,15 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   period              = 60
   statistic           = "Average"
   threshold           = 70
-  dimensions = { AutoScalingGroupName = aws_autoscaling_group.asg.name }
-  alarm_description   = "CPU > 70% for 2 minutes"
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.asg.name
+  }
+  alarm_description = "CPU > 70% for 2 minutes"
 }
 
+# -------------------------
+# Outputs
+# -------------------------
 output "asg_name" { value = aws_autoscaling_group.asg.name }
+output "launch_template_id" { value = aws_launch_template.lt.id }
+output "launch_template_latest_version" { value = aws_launch_template.lt.latest_version }
