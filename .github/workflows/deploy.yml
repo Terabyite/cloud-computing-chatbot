@@ -1,49 +1,17 @@
-name: CI - Build Docker, Terraform, Deploy to Ubuntu EC2 via SSM
+name: Terraform + Docker Deploy
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
   workflow_dispatch:
-
-env:
-  IMAGE_NAME: ai-chatbot
-  IMAGE_TAG: latest
-  TAR_PREFIX: ai-chatbot-image
-  TF_DIR: terraform
-  # SSM target tag - instances must be tagged with this key/value
-  SSM_TARGET_TAG: ManagedBy
-  SSM_TARGET_VALUE: github-actions
-  # Wait time for SSM command (seconds)
-  SSM_TIMEOUT: 600
-
-permissions:
-  contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image
-        run: |
-          set -eux
-          docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
-
-      - name: Save image to tar.gz
-        id: save_tar
-        run: |
-          set -eux
-          COMMIT=${GITHUB_SHA::8}
-          TAR_FILE="${TAR_PREFIX}-${COMMIT}.tar.gz"
-          docker save "${IMAGE_NAME}:${IMAGE_TAG}" | gzip > "${TAR_FILE}"
-          echo "tarfile=${TAR_FILE}" >> $GITHUB_OUTPUT
-          echo "${TAR_FILE}" > /tmp/tarfile.txt
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -52,156 +20,46 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Upload tar to S3
-        id: upload_to_s3
-        run: |
-          set -eux
-          if [ -z "${{ secrets.S3_BUCKET }}" ]; then
-            echo "Repository secret S3_BUCKET not set"
-            exit 1
-          fi
-          TAR_FILE=$(cat /tmp/tarfile.txt)
-          S3_KEY="docker-images/${TAR_FILE}"
-          aws s3 cp "${TAR_FILE}" "s3://${{ secrets.S3_BUCKET }}/${S3_KEY}" --only-show-errors
-          echo "s3_key=${S3_KEY}" >> $GITHUB_OUTPUT
-          echo "${S3_KEY}" > /tmp/s3_key.txt
-
-      - name: Setup Terraform (init & apply)
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Terraform init
-        working-directory: ${{ env.TF_DIR }}
+      - name: Terraform Init
+        working-directory: terraform
         run: terraform init -input=false
 
-      - name: Terraform apply
-        working-directory: ${{ env.TF_DIR }}
-        env:
-          TF_VAR_key_name: ${{ secrets.TF_VAR_key_name || "" }}
-          TF_VAR_project: ${{ secrets.TF_VAR_project || "" }}
-          TF_VAR_s3_bucket_name: ${{ secrets.S3_BUCKET || "" }}
+      - name: Terraform Apply
+        working-directory: terraform
         run: terraform apply -auto-approve -input=false
 
-      - name: Create Ubuntu SSM deploy script + params.json (Python)
-        id: make_script
+      - name: Deploy chatbot with Docker via SSM (target: ManagedBy=github-actions)
         env:
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
-          S3_KEY: ${{ steps.upload_to_s3.outputs.s3_key }}
-          CONTAINER_NAME: ${{ env.IMAGE_NAME }}
-          IMAGE_NAME_FULL: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          SSM_TAG_KEY: ManagedBy
+          SSM_TAG_VALUE: github-actions
         run: |
-          set -euxo pipefail
-          python3 - <<'PY'
-import os, json, textwrap
-
-s3_bucket = os.environ.get("S3_BUCKET","")
-s3_key = os.environ.get("S3_KEY","")
-container_name = os.environ.get("CONTAINER_NAME","ai-chatbot")
-image_name = os.environ.get("IMAGE_NAME_FULL","ai-chatbot:latest")
-
-script = textwrap.dedent(f"""\
-#!/bin/bash
-set -xe
-
-# Ubuntu-specific deployment script (apt)
-S3_BUCKET="{s3_bucket}"
-S3_KEY="{s3_key}"
-TAR_FILE="/tmp/$(basename ${S3_KEY})"
-CONTAINER_NAME="{container_name}"
-IMAGE_NAME="{image_name}"
-
-# Update and install prerequisites
-apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg lsb-release apt-transport-https software-properties-common jq
-
-# Install Docker (using packaged docker.io as fallback)
-if command -v docker >/dev/null 2>&1; then
-  echo "docker already installed"
-else
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg || true
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io || apt-get install -y docker.io -y || true
-  systemctl enable --now docker || true
-fi
-
-# Ensure aws cli present
-if ! command -v aws >/dev/null 2>&1; then
-  apt-get install -y awscli || true
-fi
-
-# Create directory for downloaded tar
-mkdir -p /tmp
-
-# Download image tar from S3
-aws s3 cp "s3://${S3_BUCKET}/${S3_KEY}" "${TAR_FILE}"
-
-# Load and run container
-gzip -d -c "${TAR_FILE}" | docker load
-docker rm -f "${CONTAINER_NAME}" || true
-docker run -d --name "${CONTAINER_NAME}" --restart unless-stopped -p 8080:8080 "${IMAGE_NAME}"
-""")
-
-# Write the script and params for SSM
-with open('/tmp/deploy-script-ubuntu.sh','w') as f:
-    f.write(script)
-os.chmod('/tmp/deploy-script-ubuntu.sh', 0o755)
-
-# SSM wants {"commands": ["line1", "line2", ...]}
-lines = script.splitlines()
-with open('/tmp/params.json','w') as j:
-    json.dump({"commands": lines}, j)
-
-print("WROTE /tmp/deploy-script-ubuntu.sh and /tmp/params.json")
-PY
-
-      - name: Send SSM command to Ubuntu targets (by tag)
-        id: send_command
-        run: |
-          set -eux
-          TARGET_KEY="${{ env.SSM_TARGET_TAG }}"
-          TARGET_VALUE="${{ env.SSM_TARGET_VALUE }}"
-          CMD_JSON=$(aws ssm send-command \
+          aws ssm send-command \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy ai-chatbot docker (Ubuntu target)" \
-            --targets "Key=${TARGET_KEY},Values=${TARGET_VALUE}" \
-            --parameters file:///tmp/params.json \
+            --targets "Key=tag:${SSM_TAG_KEY},Values=${SSM_TAG_VALUE}" \
+            --parameters 'commands=[
+              "set -xe",
+              "sudo apt-get update -y || sudo yum update -y || true",
+              "if command -v docker >/dev/null 2>&1; then echo docker present; else ( \
+                 if command -v apt-get >/dev/null 2>&1; then \
+                   apt-get install -y ca-certificates curl gnupg lsb-release && \
+                   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg || true && \
+                   echo \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list && \
+                   apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io || apt-get install -y docker.io || true ; \
+                 else \
+                   yum install -y docker git || true ; \
+                 fi ); fi",
+              "sudo systemctl enable docker || true",
+              "sudo systemctl start docker || true",
+              "cd /home/ec2-user || cd /home/ubuntu || cd /root || true",
+              "if [ ! -d chatbot ]; then git clone https://github.com/Terabyite/cloud-computing-chatbot.git chatbot; fi",
+              "cd chatbot || true",
+              "git pull || true",
+              "sudo docker rm -f chatbot || true",
+              "sudo docker build -t chatbot:latest .",
+              "sudo docker run -d --name chatbot -p 8080:8080 --restart=always chatbot:latest"
+            ]' \
             --timeout-seconds 600 \
-            --output json)
-          echo "${CMD_JSON}" > /tmp/sendcmd.json
-          CMD_ID=$(jq -r '.Command.CommandId' /tmp/sendcmd.json)
-          echo "command_id=${CMD_ID}" >> $GITHUB_OUTPUT
-          echo "${CMD_ID}" > /tmp/command_id.txt
-          echo "Sent command ${CMD_ID}"
-
-      - name: Poll SSM command until finished
-        env:
-          SSM_TIMEOUT: ${{ env.SSM_TIMEOUT }}
-        run: |
-          set -eux
-          CMD_ID=$(cat /tmp/command_id.txt)
-          DEADLINE=$((SECONDS + SSM_TIMEOUT))
-          echo "Waiting for SSM command ${CMD_ID} to reach final state (timeout ${SSM_TIMEOUT}s)..."
-          while [ $SECONDS -lt $DEADLINE ]; do
-            aws ssm list-command-invocations --command-id "$CMD_ID" --details --output json > /tmp/invocations.json
-            STATUSES=$(jq -r '.CommandInvocations[].Status' /tmp/invocations.json || true)
-            echo "Statuses: ${STATUSES}"
-            if [ -z "${STATUSES}" ]; then
-              sleep 5
-              continue
-            fi
-            if echo "${STATUSES}" | grep -E "(InProgress|Pending|Delayed)" >/dev/null; then
-              sleep 5
-              continue
-            fi
-            if echo "${STATUSES}" | grep -E "(Failed|Cancelled|TimedOut|Undeliverable)" >/dev/null; then
-              echo "One or more invocations failed — dumping details:"
-              cat /tmp/invocations.json
-              exit 1
-            fi
-            echo "SSM invocation completed successfully:"
-            cat /tmp/invocations.json
-            exit 0
-          done
-          echo "Timeout waiting for SSM command ${CMD_ID}"
-          aws ssm list-command-invocations --command-id "$CMD_ID" --details --output json || true
-          exit 2
+            --comment "Deploy chatbot docker via SSM (ManagedBy=github-actions)"
