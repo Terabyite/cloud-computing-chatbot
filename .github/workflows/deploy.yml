@@ -1,4 +1,4 @@
-name: Terraform + Docker Deploy (Ubuntu)
+name: Terraform + Docker Deploy
 
 on:
   push:
@@ -7,11 +7,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    env:
-      TF_WORKING_DIR: terraform
-      EC2_TAG_NAME: ai-chatbot-ec2   # This must match the Name tag in your ASG/launch template
-      CHATBOT_REPO_URL: https://github.com/Terabyite/-Chatbot-On-AWS-EC2.git
 
     steps:
       - name: Checkout repo
@@ -28,48 +23,52 @@ jobs:
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform Init
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        working-directory: terraform
         run: terraform init
 
       - name: Terraform Apply
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        working-directory: terraform
         run: terraform apply -auto-approve
 
-      # Wait until at least ONE instance with tag Name=ai-chatbot-ec2 is online in SSM
-      - name: Wait for SSM-managed instances
-        run: |
-          set -e
-          for i in {1..30}; do
-            COUNT=$(aws ssm describe-instance-information \
-              --filters "Key=tag:Name,Values=${EC2_TAG_NAME}" \
-              --query "InstanceInformationList | length(@)" \
-              --output text)
-            echo "SSM instances with tag Name=${EC2_TAG_NAME}: $COUNT"
-            if [ "$COUNT" -ge 1 ]; then
-              echo "At least one instance is online in SSM."
-              break
-            fi
-            echo "Waiting for instances to come online in SSM (attempt $i/30)..."
-            sleep 20
-          done
-
+      # --- Deploy chatbot via SSM on Ubuntu instances ---
       - name: Deploy chatbot with Docker via SSM (Ubuntu)
         run: |
           aws ssm send-command \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy chatbot docker container" \
-            --targets "Key=tag:Name,Values=${EC2_TAG_NAME}" \
-            --parameters 'commands=[
-              "set -xe",
-              "sudo apt-get update -y",
-              "sudo apt-get install -y docker.io git",
-              "sudo systemctl enable docker",
-              "sudo systemctl start docker",
-              "cd /home/ubuntu",
-              "if [ ! -d chatbot ]; then git clone '"${CHATBOT_REPO_URL}"' chatbot; fi",
-              "cd chatbot",
-              "git pull",
-              "sudo docker rm -f chatbot || true",
-              "sudo docker build -t chatbot:latest .",
-              "sudo docker run -d --name chatbot -p 8080:8080 --restart=always chatbot:latest"
-            ]'
+            --comment "Deploy chatbot docker on Ubuntu EC2" \
+            --targets "Key=tag:ManagedBy,Values=github-actions" \
+            --parameters '{
+              "commands": [
+                "set -xe",
+                "echo === Starting chatbot Docker deployment on Ubuntu ===",
+                "whoami",
+                "uname -a",
+
+                "# Update apt and install Docker + Git",
+                "sudo apt-get update -y",
+                "sudo apt-get install -y docker.io git",
+
+                "# Enable and start Docker",
+                "sudo systemctl enable docker || true",
+                "sudo systemctl start docker || true",
+
+                "# Work under ubuntu home",
+                "cd /home/ubuntu",
+
+                "# Clone or update your repo that contains Dockerfile + app",
+                "if [ ! -d app ]; then git clone https://github.com/Terabyite/cloud-computing-chatbot.git app; fi",
+                "cd app",
+                "git pull",
+
+                "# Build and run Docker container",
+                "sudo docker rm -f chatbot || true",
+                "sudo docker build -t chatbot:latest .",
+                "sudo docker run -d --name chatbot -p 8080:8080 --restart=always chatbot:latest",
+
+                "echo === Docker deployment finished ===",
+                "sudo docker ps",
+                "ss -ltnp | grep 8080 || echo no-listen-8080"
+              ]
+            }' \
+            --timeout-seconds 900 \
+            --output text

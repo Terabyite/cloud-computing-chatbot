@@ -57,13 +57,12 @@ resource "aws_launch_template" "lt" {
   }
 
   tag_specifications {
-    resource_type = "instance"
-    tags = merge({
-      Name      = "${var.project}-ec2"
-      ManagedBy = "github-actions"
-      Project   = var.project
-    }, var.tags)
+  resource_type = "instance"
+  tags = {
+    Name      = "${var.project}-ec2"
+    ManagedBy = "github-actions"
   }
+}
 
   # enforce IMDSv2 (recommended)
   metadata_options {
@@ -94,11 +93,11 @@ resource "aws_autoscaling_group" "asg" {
   }
 
   # Basic name tag + propagate additional tags (propagate_at_launch true)
-  tag {
-    key                 = "Name"
-    value               = "${var.project}-ec2"
-    propagate_at_launch = true
-  }
+ tag {
+  key                 = "ManagedBy"
+  value               = "github-actions"
+  propagate_at_launch = true
+}
 
   dynamic "tag" {
     for_each = var.tags
