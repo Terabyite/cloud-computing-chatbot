@@ -94,8 +94,8 @@ resource "aws_autoscaling_group" "asg" {
 
   # Basic name tag + propagate additional tags (propagate_at_launch true)
  tag {
-  key                 = "ManagedBy"
-  value               = "github-actions"
+  key                 = "Name"
+  value               = "${var.project}-ec2"  # and var.project = "ai-chatbot"
   propagate_at_launch = true
 }
 
