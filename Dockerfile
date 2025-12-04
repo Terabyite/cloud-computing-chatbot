@@ -1,13 +1,13 @@
 # Lightweight Python image
 FROM python:3.10-slim
 
-# Make Python output unbuffered (better logs)
+# Better logging
 ENV PYTHONUNBUFFERED=1
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (NO libatlas-base-dev)
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       build-essential \
@@ -17,11 +17,11 @@ RUN apt-get update && \
       wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only requirements first (better layer cache)
+# Copy requirements first (better cache)
 COPY requirements.txt /app/
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the app
 COPY . /app
@@ -33,7 +33,7 @@ nltk.download("punkt")
 nltk.download("wordnet")
 EOF
 
-# Expose the Tornado port
+# Expose Tornado port
 EXPOSE 8080
 
 # Start the chatbot

@@ -30,36 +30,43 @@ jobs:
         working-directory: terraform
         run: terraform apply -auto-approve
 
-      # IMPORTANT: this assumes:
-      # - Instances are Ubuntu
-      # - ASG tags instances with Name = "${var.project}-ec2" (ai-chatbot-ec2)
-      - name: Deploy chatbot with Docker via SSM
+      # Give EC2/ASG a bit of time to come up and register with SSM
+      - name: Wait for EC2 + SSM
+        run: |
+          echo "Waiting 120 seconds for instances to become SSM online..."
+          sleep 200
+
+      - name: Deploy chatbot with Docker via SSM (Ubuntu)
         run: |
           aws ssm send-command \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy chatbot Docker on Ubuntu" \
+            --comment "Deploy chatbot Docker container on Ubuntu instances" \
             --targets "Key=tag:Name,Values=ai-chatbot-ec2" \
-            --parameters '{
-              "commands": [
-                "set -xe",
-                "echo === Installing Docker & Git on Ubuntu ===",
-                "if ! command -v docker >/dev/null 2>&1; then",
-                "  apt-get update -y && apt-get install -y docker.io git",
-                "  systemctl enable docker || true",
-                "  systemctl start docker || true",
-                "fi",
-                "echo === Cloning chatbot repo ===",
-                "cd /home/ubuntu",
-                "if [ ! -d cloud-computing-chatbot ]; then",
-                "  git clone https://github.com/Terabyite/cloud-computing-chatbot.git",
-                "fi",
-                "cd cloud-computing-chatbot",
-                "git pull",
-                "echo === Building Docker image ===",
-                "docker rm -f chatbot || true",
-                "docker build -t chatbot:latest .",
-                "echo === Running container on port 8080 ===",
-                "docker run -d --name chatbot -p 8080:8080 --restart=always chatbot:latest",
-                "echo === Done. Check with: docker ps && curl -v http://localhost:8080/ ==="
-              ]
-            }'
+            --parameters 'commands=[
+              "set -xe",
+              "echo ==== BEGIN CHATBOT DOCKER DEPLOY ====",
+              "uname -a",
+              "whoami",
+              "echo Updating apt...",
+              "sudo apt-get update -y",
+              "echo Installing Docker and git...",
+              "sudo apt-get install -y docker.io git",
+              "sudo systemctl enable docker || true",
+              "sudo systemctl start docker || true",
+              "cd /home/ubuntu",
+              "if [ ! -d cloud-computing-chatbot ]; then git clone https://github.com/Terabyite/cloud-computing-chatbot.git; fi",
+              "cd cloud-computing-chatbot",
+              "git pull",
+              "echo Building Docker image...",
+              "sudo docker rm -f chatbot || true",
+              "sudo docker build -t chatbot:latest .",
+              "echo Running Docker container on port 8080...",
+              "sudo docker run -d --name chatbot -p 8080:8080 --restart=always chatbot:latest",
+              "echo Checking container status...",
+              "sudo docker ps",
+              "echo Testing http://localhost:8080/",
+              "curl -v http://localhost:8080/ || true",
+              "echo ==== END CHATBOT DOCKER DEPLOY ===="
+            ]' \
+            --timeout-seconds 600 \
+            --output text
