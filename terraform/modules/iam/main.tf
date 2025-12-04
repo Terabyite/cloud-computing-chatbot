@@ -1,114 +1,100 @@
 variable "project" {
-  description = "Project name used for resource naming/tagging"
   type        = string
+  description = "Project name prefix for resources"
 }
 
 variable "extra_managed_policy_arns" {
-  description = "Optional list of extra AWS managed policy ARNs to attach to the EC2 role"
   type        = list(string)
+  description = "Optional extra managed policy ARNs to attach to the role"
   default     = []
 }
 
 variable "tags" {
-  description = "Tags to apply to IAM resources"
   type        = map(string)
+  description = "Tags to apply to IAM resources"
   default     = {}
 }
 
-variable "s3_bucket_name" {
-  type = string
-  description = "S3 bucket name for storing Docker artifacts"
-}
-# example: minimal policy
-resource "aws_iam_policy" "ec2_s3_read_images" {
-  name        = "${var.project}-ec2-s3-read-images"
-  description = "Allow EC2 instances to read docker image tarballs from S3 uploaded by CI"
-  policy      = jsonencode({
+# IAM role for EC2 instances
+resource "aws_iam_role" "ec2_role" {
+  name = "${var.project}-ec2-role"
+
+  assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:GetObjectVersion",
-          "s3:ListBucket"
-        ]
-        Resource = [
-          "arn:aws:s3:::${var.s3_bucket_name}",
-          "arn:aws:s3:::${var.s3_bucket_name}/*"
-        ]
-      }
-    ]
-  })
-}
-
-# attach to role (example if role is aws_iam_role.ec2_role)
-resource "aws_iam_role_policy_attachment" "attach_ec2_s3_read" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = aws_iam_policy.ec2_s3_read_images.arn
-}
-# IAM role the EC2 instances will assume
-resource "aws_iam_role" "ec2_role" {
-  name               = "${var.project}-ec2-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Action = "sts:AssumeRole",
-        Effect = "Allow",
         Principal = {
           Service = "ec2.amazonaws.com"
         }
+        Action = "sts:AssumeRole"
       }
     ]
   })
 
   tags = merge({
-    Name    = "${var.project}-ec2-role"
+    Name    = "${var.project}-ec2-role",
     Project = var.project
   }, var.tags)
 }
 
-# Attach core SSM policy (required for Systems Manager)
-resource "aws_iam_role_policy_attachment" "ssm_core" {
+# Attach required managed policies
+resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.ec2_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# Attach any additional managed policies (optional)
-resource "aws_iam_role_policy_attachment" "extra_managed" {
-  for_each = toset(var.extra_managed_policy_arns)
-  role     = aws_iam_role.ec2_role.name
+resource "aws_iam_role_policy_attachment" "cw_agent" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "s3_readonly" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+}
+
+# Attach any extra managed policies supplied by caller
+resource "aws_iam_role_policy_attachment" "extra" {
+  for_each  = toset(var.extra_managed_policy_arns)
+  role      = aws_iam_role.ec2_role.name
   policy_arn = each.value
 }
 
-# Instance profile so EC2/Launch Template can reference it by name
+# Instance Profile for EC2
 resource "aws_iam_instance_profile" "ec2_profile" {
   name = "${var.project}-ec2-instance-profile"
   role = aws_iam_role.ec2_role.name
 
   tags = merge({
-    Name    = "${var.project}-ec2-instance-profile"
+    Name    = "${var.project}-ec2-instance-profile",
     Project = var.project
   }, var.tags)
 }
 
-output "ec2_role_name" {
+output "role_name" {
+  description = "IAM role name for EC2"
   value       = aws_iam_role.ec2_role.name
-  description = "Name of the IAM role attached to EC2 instances"
-}
-
-output "ec2_instance_profile_name" {
-  value       = aws_iam_instance_profile.ec2_profile.name
-  description = "Instance profile name (use this in launch templates/ASG)"
-}
-
-output "ec2_instance_profile_arn" {
-  value       = aws_iam_instance_profile.ec2_profile.arn
-  description = "Instance profile ARN"
 }
 
 output "role_arn" {
   description = "IAM role ARN for EC2"
   value       = aws_iam_role.ec2_role.arn
+}
+
+output "instance_profile_name" {
+  description = "IAM instance profile name to attach to EC2 Launch Template"
+  value       = aws_iam_instance_profile.ec2_profile.name
+}
+
+output "instance_profile_arn" {
+  description = "IAM instance profile ARN"
+  value       = aws_iam_instance_profile.ec2_profile.arn
+}
+
+# modules/iam/outputs.tf
+output "ec2_instance_profile_name" {
+  description = "Name of the EC2 instance profile created for EC2 role"
+  value       = aws_iam_instance_profile.ec2_profile.name
+  # If you want the ARN instead, use: aws_iam_instance_profile.ec2_profile.arn
 }
