@@ -45,6 +45,7 @@ Deployment happens automically when you push to main.
 #### What it does:
 
 **Creates**
+|-------------------------------|------------------------------------------|
 |**VPC (Virtual Private Cloud)**| your private network in AWS.
 |**Public subnets**             |subnets that can reach the internet directly for things like the ALB.
 |**Private subnets**            |subnets with no direct public IPs, used for EC2 instances in the Auto Scaling Group.
@@ -56,7 +57,7 @@ Deployment happens automically when you push to main.
 
 #### What it does:
 **Creates Security Groups (virtual firewalls) for:**
-
+|---------------------------|------------------------------------------|
 |**ALB security group**     | allows inbound HTTP/HTTPS (e.g. ports 80 and 443) from the internet.
 |**EC2/ASG security group** | only allows inbound traffic from the ALB security group on the application port (e.g. 8080 or 80).
 |**Optionally, an SSH security group for admin access (usually restricted by IP).**
