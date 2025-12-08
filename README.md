@@ -7,16 +7,6 @@ This project is an end to end deployment of an AI Chatbot application on AWS usi
 You do not run Terraform manually and you don’t SSH into servers.
 Deployment happens automically when you push to main.
 
-### **Features**
-- Python AI chatbot with training support
-- Web based response interface
-- Docker containerization for portability
-- Terraform automation for AWS resource provisioning
-- GitHub Actions workflow for continuous deployment
-- Easy to extend, modify, and scale
-
-## **GitHub Actions → provisions infrastructure → deploys your chatbot → monitors it live.**
-
 ### **Main Features**
 - Modular Terraform infrastructure
 - Remote Terraform State stored in S3
@@ -28,6 +18,9 @@ Deployment happens automically when you push to main.
 - Dockerized Python chatbot
 - HTTPS support with ACM
 - DNS with Route53 → domain points to ALB
+
+## **Architecture**
+<img width="2025" height="1233" alt="terra" src="https://github.com/user-attachments/assets/2dcf776a-b3bc-4538-bc2d-2587a894cb3b" />
 
 ## **Infrastructure Breakdown**
 
@@ -241,22 +234,22 @@ Repo contains:
 ## **Deployed Resources on AWS (Screenshots)**
 
 ### **Auto Scaling Group**
-![alt text](asg.png)
+<img width="1440" height="735" alt="Screenshot 2025-12-08 at 7 05 32 PM" src="https://github.com/user-attachments/assets/2982962d-9172-472d-8133-59cab70b11d3" />
 
 ### **CloudWatch**
-![alt text](cloudwatch.png)
+<img width="1440" height="492" alt="Screenshot 2025-12-08 at 4 10 28 PM" src="https://github.com/user-attachments/assets/b06bd3ff-5f8d-4987-ad5e-d19d65087004" />
 
 ### **EC2 Instance**
-![alt text](instance.png)
+<img width="1440" height="287" alt="Screenshot 2025-12-08 at 4 04 51 PM" src="https://github.com/user-attachments/assets/b266bfe0-af35-4519-a338-3eafc8b158f4" />
 
 ### **Identity and Access Management (IAM)**
-![alt text](iam.png)
+<img width="1440" height="287" alt="Screenshot 2025-12-08 at 4 03 46 PM" src="https://github.com/user-attachments/assets/40991268-c680-4a52-adeb-440eb3406503" />
 
 ### **Security Groups**
-![alt text](sg.png)
+<img width="1440" height="352" alt="Screenshot 2025-12-08 at 4 01 51 PM" src="https://github.com/user-attachments/assets/6e74c270-f092-4aed-a05a-92e571741292" />
 
 ### **Docker Container on one of the instance**
-![alt text](docker.png)
+<img width="1440" height="769" alt="Screenshot 2025-12-08 at 7 08 32 PM" src="https://github.com/user-attachments/assets/298ef126-0947-4128-8c81-afa13b69f005" />
 
 ### **Hosted Zones**
 <img width="1440" height="846" alt="Screenshot 2025-11-23 at 12 37 40 PM" src="https://github.com/user-attachments/assets/47dfece2-fecf-4968-91e0-16adbdebc9c1" />
@@ -265,21 +258,19 @@ Repo contains:
 <img width="1440" height="238" alt="Screenshot 2025-11-23 at 12 41 37 PM" src="https://github.com/user-attachments/assets/2fe04cda-42c1-42c2-b162-c3c0ab999957" />
 
 ### **Load Balancer**
-![alt text](lb.png)
+<img width="1440" height="287" alt="Screenshot 2025-12-08 at 4 05 23 PM" src="https://github.com/user-attachments/assets/de1534ad-8341-4495-b74e-bb8a1854d671" />
 
 ### **NAT Gateways**
 <img width="1440" height="238" alt="Screenshot 2025-11-23 at 12 42 05 PM" src="https://github.com/user-attachments/assets/2d48394f-8dce-411c-81ac-22ccb0752322" />
 
 ### **Subnets**
-![alt text](vpc.png)
+<img width="1440" height="352" alt="Screenshot 2025-12-08 at 4 00 00 PM" src="https://github.com/user-attachments/assets/3e7a3a84-803e-46dd-b65c-eb012a448024" />
 
 ### **VPC**
-![alt text](vpc1.png)
+<img width="1440" height="352" alt="Screenshot 2025-12-08 at 4 00 00 PM" src="https://github.com/user-attachments/assets/5ac28e5e-09fe-4839-bbf4-dc59d217f0b6" />
 
 ### **Running Chatbot UI**
-![alt text](chatbotui.png)
-
-
+<img width="1440" height="864" alt="Screenshot 2025-12-08 at 6 57 14 PM" src="https://github.com/user-attachments/assets/c154e064-d913-4a97-980f-4d0e0fe60b80" />
 
 
 
