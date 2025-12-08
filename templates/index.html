@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Chatbox</title>
+    <!-- 最新版本的 Bootstrap 核心 CSS 文件 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@3.3.7/dist/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
+    <link rel="stylesheet" href="{{ static_url("chat.css") }}" type="text/css">
+  </head>
+  <body>
+    <div id="body">
+      <div id="title">
+        ChatBox
+      </div>
+      <div id="inbox">
+        {% for message in messages %}
+          {% module Template("message.html", message=message) %}
+        {% end %}
+      </div>
+      <div id="input">
+        <form action="/a/message/new" method="post" id="messageform">
+          <div class="form-group input-container">
+            <input class="form-control" type="text" name="body" id="message-input" placeholder="请输入消息">
+            <button type="submit" class="btn btn-info">发送</button>
+            <input type="hidden" name="next" value="{{ request.path }}">
+            {% module xsrf_form_html() %}
+          </div>
+        </form>
+      </div>
+    </div>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js" type="text/javascript"></script>
+    <script src="{{ static_url("chat.js") }}" type="text/javascript"></script>
+  </body>
+</html>
