@@ -200,7 +200,7 @@ python chatdemo.py
 
 Visit: http://localhost:8080
 
-### 🧹 Cleanup (Avoid AWS Charges)
+### Cleanup (Avoid AWS Charges)
 
 To delete all resources:
 
