@@ -92,7 +92,7 @@ module "iam" {
 }
 
 data "aws_ami" "ubuntu" {
-  owners      = ["099720109477"] # Canonical
+  owners      = ["099720109477"]
   most_recent = true
 
   filter {
